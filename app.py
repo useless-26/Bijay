@@ -158,7 +158,7 @@ def decode_protobuf(binary):
 @app.route('/', methods=['GET'])
 def index():
     return jsonify({
-        "credit": "BO HAKER",
+        "credit": "https://t.me/paglu_dev",
         "message": "Welcome to the Free Fire Like API",
         "status": "API is running",
         "endpoints": "/like?uid=<uid> or /like?uid=<uid>&server_name=<server_name>",
@@ -232,7 +232,7 @@ def handle_requests():
         like_given = after_like - before_like
         
         return jsonify({
-            "credit": "BP HAKER",
+            "credit": "https://t.me/paglu_dev",
             "LikesGivenByAPI": like_given,
             "LikesafterCommand": after_like,
             "LikesbeforeCommand": before_like,
