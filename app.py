@@ -19,6 +19,39 @@ AES_IV = b'6oyZDr22E3ychjM%'
 UIDPASS_FILE = "uidpass.json"
 JWT_API_URL = "http://87.232.72.68:3005/token"
 
+# Account usage tracking
+account_usage = {}  # {account_uid: {"daily_limit": 100, "used_today": 0, "last_reset": date}}
+DAILY_LIMIT_PER_ACCOUNT = 100  # Default limit per account per day
+
+def reset_daily_usage():
+    """Reset daily usage counters at midnight"""
+    today = datetime.datetime.now().date()
+    for acc in account_usage:
+        if account_usage[acc].get("last_reset") != today:
+            account_usage[acc]["used_today"] = 0
+            account_usage[acc]["last_reset"] = today
+
+def can_account_send_like(account_uid):
+    """Check if account can send more likes today"""
+    today = datetime.datetime.now().date()
+    if account_uid not in account_usage:
+        account_usage[account_uid] = {
+            "used_today": 0,
+            "daily_limit": DAILY_LIMIT_PER_ACCOUNT,
+            "last_reset": today
+        }
+    
+    if account_usage[account_uid]["last_reset"] != today:
+        account_usage[account_uid]["used_today"] = 0
+        account_usage[account_uid]["last_reset"] = today
+    
+    return account_usage[account_uid]["used_today"] < account_usage[account_uid]["daily_limit"]
+
+def increment_account_usage(account_uid):
+    """Increment usage counter for account"""
+    if account_uid in account_usage:
+        account_usage[account_uid]["used_today"] += 1
+
 def encrypt_message(plaintext):
     """Encrypt message with AES-CBC"""
     try:
@@ -33,10 +66,7 @@ def encrypt_message(plaintext):
 def create_like_protobuf(user_id, region):
     """Create LikeProfile protobuf message - CORRECT FORMAT"""
     try:
-        # Field 1: uid (int64) - tag 8
         result = bytearray()
-        
-        # Encode UID as varint
         uid = int(user_id)
         while uid > 0:
             byte = uid & 0x7F
@@ -45,14 +75,12 @@ def create_like_protobuf(user_id, region):
                 byte |= 0x80
             result.append(byte)
         
-        # Tag for field 1 (uid) = 8
         final = bytearray()
-        final.append(0x08)  # tag 1, type 0 (varint)
+        final.append(0x08)
         final.extend(result)
         
-        # Field 2: region (string) - tag 18
         region_bytes = region.encode('utf-8')
-        final.append(0x12)  # tag 2, type 2 (string)
+        final.append(0x12)
         final.append(len(region_bytes))
         final.extend(region_bytes)
         
@@ -65,8 +93,6 @@ def create_uid_protobuf(uid):
     """Create UID request protobuf"""
     try:
         result = bytearray()
-        
-        # Encode UID as varint
         uid_val = int(uid)
         while uid_val > 0:
             byte = uid_val & 0x7F
@@ -76,10 +102,10 @@ def create_uid_protobuf(uid):
             result.append(byte)
         
         final = bytearray()
-        final.append(0x08)  # tag 1, type 0
+        final.append(0x08)
         final.extend(result)
-        final.append(0x10)  # tag 2, type 0  
-        final.append(0x01)  # value 1
+        final.append(0x10)
+        final.append(0x01)
         
         return bytes(final)
     except Exception as e:
@@ -124,7 +150,6 @@ def get_player_info(uid, server_name, token):
         if not encrypted:
             return None
         
-        # Correct URL based on region
         if server_name == "IND":
             url = "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"
         elif server_name in ["BR", "US"]:
@@ -145,19 +170,15 @@ def get_player_info(uid, server_name, token):
         
         response = requests.post(url, data=bytes.fromhex(encrypted), headers=headers, timeout=10)
         
-        print(f"GetInfo Response: {response.status_code}")
-        
         if response.status_code != 200:
             return None
         
-        # Parse response
         data = response.content
         likes = 0
         nickname = ""
         
-        # Simple parsing for likes
         for i in range(len(data) - 4):
-            if data[i] == 0x10:  # Field 2 (likes)
+            if data[i] == 0x10:
                 j = i + 1
                 value = 0
                 shift = 0
@@ -187,7 +208,6 @@ def send_like_correct(uid, server_name, token, account_uid):
         if not encrypted:
             return False, "Encryption failed"
         
-        # Correct URL based on region
         if server_name == "IND":
             url = "https://client.ind.freefiremobile.com/LikeProfile"
         elif server_name in ["BR", "US"]:
@@ -195,7 +215,6 @@ def send_like_correct(uid, server_name, token, account_uid):
         else:
             url = "https://clientbp.ggpolarbear.com/LikeProfile"
         
-        # Complete headers exactly like original game
         headers = {
             'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
             'Connection': 'Keep-Alive',
@@ -209,26 +228,16 @@ def send_like_correct(uid, server_name, token, account_uid):
         }
         
         edata = bytes.fromhex(encrypted)
-        
-        print(f"   Sending like to: {url}")
-        print(f"   Data length: {len(edata)} bytes")
-        
         response = requests.post(url, data=edata, headers=headers, timeout=10, verify=False)
         
-        print(f"   Response Status: {response.status_code}")
-        
         if response.status_code == 200:
-            # Check response content
-            if len(response.content) > 0:
-                print(f"   Response hex: {response.content.hex()[:50]}")
             return True, "Success"
         elif response.status_code == 401:
             return False, "Token expired/invalid"
         elif response.status_code == 403:
             return False, "Rate limited or banned"
         elif response.status_code == 500:
-            # Sometimes 500 means like already given or daily limit reached
-            return False, "Server error - possibly daily limit reached"
+            return False, "Daily limit reached for this account"
         else:
             return False, f"HTTP {response.status_code}"
             
@@ -237,24 +246,279 @@ def send_like_correct(uid, server_name, token, account_uid):
     except Exception as e:
         return False, str(e)
 
+# ========= NEW: LIKE WITH ACCOUNT LIMIT ==========
+@app.route('/like-limit', methods=['GET'])
+def like_with_limit():
+    """
+    Send likes with account limit
+    Usage: /like-limit?uid=TARGET_UID&server=IND&accounts=5
+    accounts: 1 to 999 (number of accounts to use)
+    """
+    target_uid = request.args.get('uid')
+    server = request.args.get('server', '').upper()
+    accounts_to_use = int(request.args.get('accounts', 999))  # Default 999 means all accounts
+    
+    if not target_uid:
+        return jsonify({"error": "Target UID required"}), 400
+    
+    accounts = load_accounts()
+    if not accounts:
+        return jsonify({"error": "No accounts found in uidpass.json"}), 400
+    
+    # Reset daily usage
+    reset_daily_usage()
+    
+    results = []
+    success_count = 0
+    account_limit_reached = 0
+    accounts_used = 0
+    
+    print(f"\n🎯 Target: {target_uid}")
+    print(f"📊 Accounts to use: {accounts_to_use} (Total available: {len(accounts)})")
+    print(f"🌍 Server: {server or 'Auto'}")
+    print("=" * 50)
+    
+    for i, acc in enumerate(accounts):
+        # Stop if we've used the requested number of accounts
+        if accounts_used >= accounts_to_use:
+            print(f"\n✅ Reached requested limit of {accounts_to_use} accounts")
+            break
+        
+        acc_uid = acc['uid']
+        acc_password = acc['password']
+        
+        # Check if account has reached daily limit
+        if not can_account_send_like(acc_uid):
+            account_limit_reached += 1
+            results.append({
+                "account": acc_uid,
+                "status": "limit_reached",
+                "message": f"Daily limit ({DAILY_LIMIT_PER_ACCOUNT}) reached"
+            })
+            continue
+        
+        print(f"\n🔐 Using account: {acc_uid}")
+        
+        # Generate token
+        token, region, nickname, error = generate_jwt_from_guest(acc_uid, acc_password)
+        
+        if error or not token:
+            results.append({
+                "account": acc_uid,
+                "status": "failed",
+                "error": error or "Token generation failed"
+            })
+            continue
+        
+        # Use specified server or account's region
+        use_server = server or region or "IND"
+        
+        # Send like
+        success, msg = send_like_correct(target_uid, use_server, token, acc_uid)
+        
+        if success:
+            success_count += 1
+            accounts_used += 1
+            increment_account_usage(acc_uid)
+            
+            results.append({
+                "account": acc_uid,
+                "nickname": nickname,
+                "region": use_server,
+                "status": "success",
+                "likes_sent": 1,
+                "account_remaining": DAILY_LIMIT_PER_ACCOUNT - account_usage[acc_uid]["used_today"]
+            })
+            print(f"   ✅ Like sent from {acc_uid} (Remaining today: {DAILY_LIMIT_PER_ACCOUNT - account_usage[acc_uid]['used_today']})")
+        else:
+            results.append({
+                "account": acc_uid,
+                "nickname": nickname,
+                "status": "failed",
+                "error": msg
+            })
+            print(f"   ❌ Failed: {msg}")
+        
+        time.sleep(0.3)  # Delay between accounts
+    
+    return jsonify({
+        "target_uid": int(target_uid),
+        "server_used": server or "Auto",
+        "accounts_requested": accounts_to_use,
+        "accounts_used": accounts_used,
+        "successful_likes": success_count,
+        "total_accounts": len(accounts),
+        "accounts_limit_reached": account_limit_reached,
+        "daily_limit_per_account": DAILY_LIMIT_PER_ACCOUNT,
+        "results": results,
+        "account_usage": account_usage
+    })
+
+# ========= UPDATED: like-simple with account limit parameter ==========
+@app.route('/like-simple', methods=['GET'])
+def like_simple():
+    """
+    Send ONE like from each account (with optional account limit)
+    Usage: /like-simple?uid=TARGET_UID&server=IND&accounts=5
+    """
+    target_uid = request.args.get('uid')
+    server = request.args.get('server', '').upper()
+    accounts_to_use = int(request.args.get('accounts', 999))  # Default all accounts
+    
+    if not target_uid:
+        return jsonify({"error": "Target UID required"}), 400
+    
+    accounts = load_accounts()
+    if not accounts:
+        return jsonify({"error": "No accounts found"}), 400
+    
+    # Reset daily usage
+    reset_daily_usage()
+    
+    results = []
+    success_count = 0
+    accounts_used = 0
+    limit_reached_count = 0
+    
+    print(f"\n🔵 like-simple called with accounts={accounts_to_use}")
+    
+    for i, acc in enumerate(accounts):
+        # Stop if we've used requested number of accounts
+        if accounts_used >= accounts_to_use:
+            print(f"✅ Reached limit of {accounts_to_use} accounts")
+            break
+        
+        acc_uid = acc['uid']
+        acc_password = acc['password']
+        
+        # Check daily limit
+        if not can_account_send_like(acc_uid):
+            limit_reached_count += 1
+            results.append({
+                "account": acc_uid,
+                "status": "limit_reached",
+                "message": f"Daily limit ({DAILY_LIMIT_PER_ACCOUNT}) reached"
+            })
+            continue
+        
+        print(f"\n🔐 Testing account: {acc_uid}")
+        
+        token, region, nickname, error = generate_jwt_from_guest(acc_uid, acc_password)
+        
+        if error or not token:
+            results.append({
+                "account": acc_uid,
+                "status": "failed",
+                "error": error or "Token generation failed"
+            })
+            continue
+        
+        use_server = server or region or "IND"
+        success, msg = send_like_correct(target_uid, use_server, token, acc_uid)
+        
+        if success:
+            success_count += 1
+            accounts_used += 1
+            increment_account_usage(acc_uid)
+            results.append({
+                "account": acc_uid,
+                "nickname": nickname,
+                "region": use_server,
+                "status": "success",
+                "likes_sent": 1,
+                "remaining_today": DAILY_LIMIT_PER_ACCOUNT - account_usage[acc_uid]["used_today"]
+            })
+            print(f"   ✅ Success from {acc_uid}")
+        else:
+            results.append({
+                "account": acc_uid,
+                "nickname": nickname,
+                "status": "failed",
+                "error": msg
+            })
+            print(f"   ❌ Failed: {msg}")
+        
+        time.sleep(0.5)
+    
+    return jsonify({
+        "target_uid": int(target_uid),
+        "accounts_requested": accounts_to_use,
+        "accounts_used": accounts_used,
+        "successful_likes": success_count,
+        "total_accounts": len(accounts),
+        "accounts_limit_reached": limit_reached_count,
+        "daily_limit_per_account": DAILY_LIMIT_PER_ACCOUNT,
+        "results": results
+    })
+
+# ========= NEW: Get account usage stats ==========
+@app.route('/usage', methods=['GET'])
+def get_usage():
+    """Get current account usage statistics"""
+    reset_daily_usage()
+    accounts = load_accounts()
+    
+    usage_stats = []
+    for acc in accounts:
+        acc_uid = acc['uid']
+        if acc_uid in account_usage:
+            usage_stats.append({
+                "account": acc_uid,
+                "used_today": account_usage[acc_uid]["used_today"],
+                "daily_limit": account_usage[acc_uid]["daily_limit"],
+                "remaining": account_usage[acc_uid]["daily_limit"] - account_usage[acc_uid]["used_today"]
+            })
+        else:
+            usage_stats.append({
+                "account": acc_uid,
+                "used_today": 0,
+                "daily_limit": DAILY_LIMIT_PER_ACCOUNT,
+                "remaining": DAILY_LIMIT_PER_ACCOUNT
+            })
+    
+    return jsonify({
+        "total_accounts": len(accounts),
+        "daily_limit_per_account": DAILY_LIMIT_PER_ACCOUNT,
+        "accounts": usage_stats
+    })
+
+# ========= NEW: Reset account usage ==========
+@app.route('/reset-usage', methods=['GET'])
+def reset_usage():
+    """Reset all account usage counters (admin only)"""
+    global account_usage
+    account_usage = {}
+    return jsonify({"status": "success", "message": "All account usage counters reset"})
+
+# ========= ORIGINAL ENDPOINTS (for backward compatibility) ==========
 @app.route('/')
 def index():
     accounts = load_accounts()
     return jsonify({
         "credit": "https://t.me/paglu_dev",
-        "message": "FreeFire Like API - Fixed Version",
+        "message": "FreeFire Like API - With Account Limit",
         "total_accounts": len(accounts),
+        "daily_limit_per_account": DAILY_LIMIT_PER_ACCOUNT,
         "endpoints": {
+            "/like-simple?uid=<target>&accounts=<1-999>": "Send 1 like from X accounts",
+            "/like-limit?uid=<target>&accounts=<1-999>": "Send 1 like from X accounts (detailed)",
+            "/like?uid=<target>&max=<n>": "Send multiple likes from all accounts",
+            "/check?uid=<target>": "Check player likes",
             "/test-single?uid=<target>&account=<acc_uid>": "Test single account",
-            "/like?uid=<target>": "Send likes from all accounts",
-            "/like-simple?uid=<target>": "Simple like (1 per account)",
-            "/check?uid=<target>": "Check player likes"
+            "/add-account?uid=<uid>&password=<pwd>": "Add new account",
+            "/usage": "View account usage statistics",
+            "/reset-usage": "Reset usage counters (admin)"
+        },
+        "examples": {
+            "Send from 1 account": "/like-simple?uid=1241124732&accounts=1",
+            "Send from 5 accounts": "/like-simple?uid=1241124732&accounts=5",
+            "Send from all accounts": "/like-simple?uid=1241124732",
+            "Check usage": "/usage"
         }
     })
 
 @app.route('/check', methods=['GET'])
 def check_player():
-    """Check player current likes"""
     target_uid = request.args.get('uid')
     server = request.args.get('server', 'IND').upper()
     
@@ -278,7 +542,6 @@ def check_player():
 
 @app.route('/test-single', methods=['GET'])
 def test_single():
-    """Test a single account"""
     target_uid = request.args.get('uid')
     account_uid = request.args.get('account')
     
@@ -295,13 +558,11 @@ def test_single():
     if not account:
         return jsonify({"error": f"Account {account_uid} not found"}), 404
     
-    # Generate token
     token, region, nickname, error = generate_jwt_from_guest(account_uid, account['password'])
     
     if error or not token:
         return jsonify({"error": f"Token failed: {error}"}), 500
     
-    # Try to send like
     success, msg = send_like_correct(target_uid, region or "IND", token, account_uid)
     
     return jsonify({
@@ -314,74 +575,8 @@ def test_single():
         "token_valid": True
     })
 
-@app.route('/like-simple', methods=['GET'])
-def like_simple():
-    """Send ONE like from each account (simple and fast)"""
-    target_uid = request.args.get('uid')
-    server = request.args.get('server', '').upper()
-    
-    if not target_uid:
-        return jsonify({"error": "Target UID required"}), 400
-    
-    accounts = load_accounts()
-    if not accounts:
-        return jsonify({"error": "No accounts found"}), 400
-    
-    results = []
-    success_count = 0
-    
-    for acc in accounts:
-        acc_uid = acc['uid']
-        acc_password = acc['password']
-        
-        print(f"\n🔐 Testing account: {acc_uid}")
-        
-        # Generate token
-        token, region, nickname, error = generate_jwt_from_guest(acc_uid, acc_password)
-        
-        if error or not token:
-            results.append({
-                "account": acc_uid,
-                "status": "failed",
-                "error": error or "Token generation failed"
-            })
-            continue
-        
-        # Use specified server or account's region
-        use_server = server or region or "IND"
-        
-        # Send like
-        success, msg = send_like_correct(target_uid, use_server, token, acc_uid)
-        
-        if success:
-            success_count += 1
-            results.append({
-                "account": acc_uid,
-                "nickname": nickname,
-                "region": use_server,
-                "status": "success",
-                "message": msg
-            })
-        else:
-            results.append({
-                "account": acc_uid,
-                "nickname": nickname,
-                "status": "failed",
-                "error": msg
-            })
-        
-        time.sleep(0.5)  # Delay between accounts
-    
-    return jsonify({
-        "target_uid": int(target_uid),
-        "successful_likes": success_count,
-        "total_accounts": len(accounts),
-        "results": results
-    })
-
 @app.route('/like', methods=['GET'])
 def like_multiple():
-    """Send multiple likes from each account"""
     target_uid = request.args.get('uid')
     server = request.args.get('server', '').upper()
     max_likes = int(request.args.get('max', 3))
@@ -392,6 +587,8 @@ def like_multiple():
     accounts = load_accounts()
     results = []
     total_likes = 0
+    
+    reset_daily_usage()
     
     for acc in accounts:
         token, region, nickname, error = generate_jwt_from_guest(acc['uid'], acc['password'])
@@ -408,11 +605,16 @@ def like_multiple():
         account_likes = 0
         
         for i in range(max_likes):
+            if not can_account_send_like(acc['uid']):
+                print(f"   ⚠️ {acc['uid']} daily limit reached")
+                break
+                
             success, msg = send_like_correct(target_uid, use_server, token, acc['uid'])
             
             if success:
                 account_likes += 1
                 total_likes += 1
+                increment_account_usage(acc['uid'])
                 print(f"   ✅ {acc['uid']} like {i+1} success")
             else:
                 print(f"   ❌ {acc['uid']} like {i+1} failed: {msg}")
@@ -447,7 +649,6 @@ def add_account():
     
     accounts = load_accounts()
     
-    # Check if exists
     for acc in accounts:
         if acc['uid'] == uid:
             return jsonify({"error": "Account already exists"}), 400
@@ -457,7 +658,6 @@ def add_account():
     with open(UIDPASS_FILE, 'w') as f:
         json.dump(accounts, f, indent=2)
     
-    # Test the account
     token, region, nickname, error = generate_jwt_from_guest(uid, password)
     
     return jsonify({
@@ -469,26 +669,22 @@ def add_account():
     })
 
 if __name__ == '__main__':
+    import datetime
     port = int(os.environ.get("PORT", 8080))
     
     print("""
     ╔══════════════════════════════════════════════════════════╗
-    ║     🔥 FREE FIRE LIKE API - FIXED VERSION 🔥             ║
+    ║     🔥 FREE FIRE LIKE API - WITH ACCOUNT LIMIT 🔥        ║
     ╠══════════════════════════════════════════════════════════╣
     ║                                                           ║
-    ║  USE THESE ENDPOINTS:                                    ║
+    ║  NEW FEATURE: Account Limit Control                      ║
     ║                                                           ║
-    ║  1. Check player likes:                                  ║
-    ║     /check?uid=1241124732                                ║
+    ║  /like-simple?uid=1241124732&accounts=1   (1 account)   ║
+    ║  /like-simple?uid=1241124732&accounts=5   (5 accounts)  ║
+    ║  /like-simple?uid=1241124732              (all accounts)║
     ║                                                           ║
-    ║  2. Send 1 like from each account (RECOMMENDED):        ║
-    ║     /like-simple?uid=1241124732                          ║
-    ║                                                           ║
-    ║  3. Test single account:                                 ║
-    ║     /test-single?uid=1241124732&account=4549583213      ║
-    ║                                                           ║
-    ║  4. Add new account:                                     ║
-    ║     /add-account?uid=123456&password=HASH               ║
+    ║  /usage - Check account usage                            ║
+    ║  /reset-usage - Reset daily counters                     ║
     ║                                                           ║
     ╚══════════════════════════════════════════════════════════╝
     """)
